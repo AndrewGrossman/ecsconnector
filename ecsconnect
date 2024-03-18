@@ -1,0 +1,101 @@
+#!/bin/bash
+#
+# Utility script to connect to a shell in a deployed container in ECS
+
+region="us-east-1"
+
+# If REGION environment variable is set, use it as the default region
+if [[ -n $REGION ]]; then
+    region=$REGION
+fi
+
+
+# Get available profiles
+profiles=$(aws configure list-profiles)
+IFS=$'\n' profiles=($profiles)
+
+# Read last used profile from file or use default if it does not exist
+last_profile_file="$HOME/.ecsconnect_last_profile.txt"
+if [ -f "$last_profile_file" ]; then
+    default_profile=$(<$last_profile_file)
+else
+    default_profile="default"
+fi
+
+# Display Profiles with numbers
+echo "Which profile would you like to use? (default: $default_profile)"
+i=1
+for profile in "${profiles[@]}"
+do
+   echo "$i) $profile"
+   i=$((i+1))
+done
+
+# Read the user's selection
+read -p "Choice (just hit enter for default): " choice
+
+if [[ -z $choice ]]; then
+    profile=$default_profile
+    echo "You have selected default profile $profile"
+elif [[ $choice -le ${#profiles[@]} ]]; then
+    profile=${profiles[$choice-1]}
+    echo "You have selected profile $profile"
+    # Store last used profile
+    echo "$profile" > "$last_profile_file"
+else
+    echo "Invalid selection, please select between 1..${#profiles[@]}"
+fi
+
+echo
+echo Using selected profile $profile
+echo Using region $region
+echo
+
+clusterArns=$(aws ecs list-clusters --profile $profile --region $region --output json | jq -r '.clusterArns[]'| sort)
+clusters=()
+for clusterArn in $clusterArns; do
+    clusters+=($(echo $clusterArn | awk -F '/' '{print $NF}'))
+done
+
+echo "Which cluster would you like to connect to?"
+select cluster in "${clusters[@]}"; do
+    if [[ -n $cluster ]]; then
+        echo "You have selected cluster $cluster"
+        break
+    else
+        echo "Invalid selection, please select between 1..${#clusters[@]}"
+    fi
+done
+
+serviceArns=$(aws ecs list-services --cluster $cluster --profile $profile --region $region --output json | jq -r '.serviceArns[]' | sort)
+services=()
+for serviceArn in $serviceArns; do
+    services+=($(echo $serviceArn | awk -F '/' '{print $NF}'))
+done
+
+echo "The $cluster has the following services available:"
+select service in "${services[@]}"; do
+    if [[ -n $service ]]; then
+        echo "You have selected service $service in cluster $cluster"
+        break
+    else
+        echo "Invalid selection, please select between 1..${#services[@]}"
+    fi
+done
+
+taskArns=$(aws ecs list-tasks --cluster $cluster --service-name $service --profile $profile --region $region --output json | jq -r '.taskArns[0]')
+task=$(echo $taskArns | awk -F "/" '{print $2}')
+taskid=$(echo $taskArns | awk -F "/" '{print $3}')
+
+echo
+echo "Connecting to task ($task) ($taskid) in service ($service)..."
+echo "$taskid"
+
+aws ecs execute-command \
+    --profile $profile \
+    --region $region \
+    --cluster $cluster \
+    --task $taskid \
+    --container $service \
+    --command "/bin/bash" \
+    --interactive
